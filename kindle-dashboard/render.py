@@ -240,7 +240,11 @@ def fetch_rail(now):
             "timeOffset": 0,
             "timeWindow": 120,
         },
-        headers={"x-apikey": api_key, "Accept": "application/json"},
+        headers={
+            "x-apikey": api_key.strip(),
+            "Accept": "application/json",
+            "User-Agent": "FinsparkKindleDashboard/1.0",
+        },
         timeout=20,
     )
     response.raise_for_status()
