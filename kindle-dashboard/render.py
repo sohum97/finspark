@@ -293,71 +293,112 @@ def draw_weather(d, weather):
             if i: d.line([M+colw*i, 168, M+colw*i, 292], fill=190, width=1)
 
 
-def draw_calendar(d, events, now):
-    d.text((M, 306), "Calendar · Today & tomorrow", font=font(25, True), fill=0)
+
+def draw_calendar(d, events, now, top=306):
+    """Draw a compact calendar list and return the y-coordinate after it."""
+    d.text((M, top), "Calendar · Today & tomorrow", font=font(25, True), fill=0)
+    y = top + 39
     if events is None:
-        d.text((M, 344), "Calendar unavailable", font=font(22), fill=110)
-        return
+        d.text((M, y), "Calendar unavailable", font=font(22), fill=110)
+        return y + 34
     if not events:
-        d.text((M, 344), "No more events today or tomorrow", font=font(21), fill=100)
-        return
-    y = 342
+        d.text((M, y), "No more events today or tomorrow", font=font(21), fill=100)
+        return y + 34
+
     today = now.date()
     for event in events[:MAX_CALENDAR_EVENTS]:
-        day_label = "Today" if event["date"] == today else "Tomorrow"
-        time_label = event["time"]
-        prefix = f"{day_label} {time_label}"
-        d.text((M, y), prefix, font=font(19, True), fill=70)
-        title_x = 190
-        title = fit(d, event["title"], font(21), W-M-title_x)
-        d.text((title_x, y-2), title, font=font(21), fill=0)
-        y += 35
+        event_date = event["date"]
+        if event.get("all_day"):
+            day_label = "TODAY" if event_date == today else "TOMORROW"
+            time_label = "All day"
+        else:
+            day_label = "TODAY" if event_date == today else "TOMORROW"
+            time_label = event["time"]
+
+        # A clear time column keeps event titles aligned and easy to scan.
+        d.text((M, y), day_label, font=font(14, True), fill=100)
+        d.text((M, y + 15), time_label, font=font(18, True), fill=0)
+        title_x = 158
+        title_font = font(21)
+        title = fit(d, event["title"], title_font, W - M - title_x)
+        d.text((title_x, y + 4), title, font=title_font, fill=0)
+        y += 34
+    return y
 
 
-def draw_tube(d, tube, status):
-    d.text((M, 496), "Tube · Finsbury Park", font=font(25, True), fill=0)
+def draw_tube(d, tube, status, top):
+    """Draw the two requested Tube lines with clearer status/reason hierarchy."""
+    d.text((M, top), "Tube · Finsbury Park", font=font(25, True), fill=0)
+    y = top + 39
+
     if tube is None and status is None:
-        d.text((M, 532), "Tube information unavailable", font=font(22), fill=110)
+        d.text((M, y), "Tube information unavailable", font=font(22), fill=110)
         return
-    y, limit = 532, 755
+
     for line_id in TUBE_LINES:
         line_status = (status or {}).get(line_id)
         name = line_status["name"] if line_status else line_id.title()
-        d.text((M, y), name, font=font(24, True), fill=0)
-        if line_status:
-            rtext(d, W-M, y+2, line_status["status"], font(21, not line_status["ok"]), 0)
-        y += 30
-        if line_status and not line_status["ok"] and line_status["reason"]:
-            for line in wrap(d, line_status["reason"], font(16), W-2*M, 2):
-                d.text((M, y), line, font=font(16), fill=70)
+        status_text = line_status["status"] if line_status else "Status unknown"
+        ok = line_status.get("ok", False) if line_status else False
+
+        # Each line gets a distinct heading row: line name left, status right.
+        d.text((M, y), name, font=font(23, True), fill=0)
+        rtext(d, W - M, y + 2, status_text, font(19, not ok), 0 if not ok else 55)
+        y += 29
+
+        reason = (line_status or {}).get("reason", "")
+        if not ok and reason:
+            reason_lines = wrap(d, reason, font(16), W - 2*M, 2)
+            for reason_line in reason_lines:
+                d.text((M + 2, y), reason_line, font=font(16), fill=65)
                 y += 19
-        if SHOW_TUBE_ARRIVALS and tube:
-            for train in tube.get(line_id, []):
-                if y+23 > limit: break
-                mins = ", ".join("due" if minute == 0 else str(minute) for minute in train["mins"]) + " min"
-                mins_font = font(20, True)
-                left = fit(d, f"→ {train['dest']}", font(20), W-2*M-d.textlength(mins, font=mins_font)-16)
-                d.text((M+8, y), left, font=font(20), fill=0)
-                rtext(d, W-M, y, mins, mins_font, 0)
-                y += 24
-        y += 5
+
+        trains = (tube or {}).get(line_id, [])
+        if trains:
+            for train in trains[:2]:
+                mins = ", ".join("due" if minute == 0 else str(minute)
+                                 for minute in train["mins"][:3]) + " min"
+                arrival_font = font(18, True)
+                destination = fit(d, f"→ {train['dest']}", font(18),
+                                  W - 2*M - d.textlength(mins, font=arrival_font) - 12)
+                d.text((M + 8, y), destination, font=font(18), fill=0)
+                rtext(d, W - M, y, mins, arrival_font, 0)
+                y += 23
+        elif ok:
+            d.text((M + 8, y), "Live arrivals unavailable", font=font(16), fill=110)
+            y += 20
+        y += 8
+
     if status:
         disrupted = sorted(item["name"] for key, item in status.items()
                            if key not in TUBE_LINES and not item["ok"])
-        summary = "Other lines: good service" if not disrupted else "Disruption: " + ", ".join(disrupted)
-        d.text((M, 770), fit(d, summary, font(16), W-2*M), font=font(16), fill=70)
+        if disrupted:
+            d.line([M, y, W-M, y], fill=170, width=1)
+            y += 8
+            d.text((M, y), "OTHER LINE DISRUPTIONS", font=font(14, True), fill=90)
+            y += 20
+            summary = " · ".join(disrupted)
+            for line in wrap(d, summary, font(16), W - 2*M, 2):
+                d.text((M, y), line, font=font(16), fill=65)
+                y += 19
 
 
 def render(weather, events, tube, status, now):
     image = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(image)
-    draw.text((M, 12), f"{now.strftime('%A')} {now.day} {now.strftime('%B')}", font=font(28, True), fill=0)
+    draw.text((M, 12), f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
+              font=font(28, True), fill=0)
     rtext(draw, W-M, 20, f"upd {now.strftime('%H:%M')}", font(18), 110)
     draw_weather(draw, weather)
     rule(draw, 296)
-    draw_calendar(draw, events, now)
-    rule(draw, 484)
-    draw_tube(draw, tube, status)
+    calendar_bottom = draw_calendar(draw, events, now, top=306)
+    # Keep the Tube panel close to the calendar when there are few events,
+    # but allow it to move down naturally when the calendar is busier.
+    tube_top = max(440, calendar_bottom + 17)
+    if tube_top > 505:
+        tube_top = 505
+    rule(draw, tube_top - 10)
+    draw_tube(draw, tube, status, tube_top)
     return image
 
 
