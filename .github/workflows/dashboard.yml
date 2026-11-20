@@ -7,36 +7,37 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: kindle-dashboard
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-and-upload:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r kindle-dashboard/requirements.txt
-      - run: python kindle-dashboard/render.py
+      - name: Install dependencies
+        run: pip install -r kindle-dashboard/requirements.txt
+      - name: Render dashboard
+        run: python kindle-dashboard/render.py
         env:
           LDBWS_TOKEN: ${{ secrets.LDBWS_TOKEN }}
           TFL_APP_KEY: ${{ secrets.TFL_APP_KEY }}
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Upload dashboard to private Cloudflare R2 via Worker
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+          CF_UPLOAD_TOKEN: ${{ secrets.CF_UPLOAD_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CF_WORKER_URL"
+          test -n "$CF_UPLOAD_TOKEN"
+          curl --fail-with-body --silent --show-error \
+            --request PUT \
+            --url "${CF_WORKER_URL%/}/upload/dashboard.png" \
+            --header "Authorization: Bearer ${CF_UPLOAD_TOKEN}" \
+            --header "Content-Type: image/png" \
+            --data-binary @site/dashboard.png
