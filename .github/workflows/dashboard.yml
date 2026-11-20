@@ -29,6 +29,7 @@ jobs:
         run: python kindle-dashboard/render.py
         env:
           TFL_APP_KEY: ${{ secrets.TFL_APP_KEY }}
+          LDBWS_API_KEY: ${{ secrets.LDBWS_API_KEY }}
           GOOGLE_CALENDAR_ICS_URL: ${{ secrets.GOOGLE_CALENDAR_ICS_URL }}
 
       - name: Upload dashboard to private Cloudflare R2 via Worker
