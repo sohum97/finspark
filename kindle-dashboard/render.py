@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Render the 600x800 greyscale Finsbury Park Kindle dashboard.
 
-Shows 12-hour weather, calendar and commute information for Finsbury Park and Archway. Calendar access uses the private GOOGLE_CALENDAR_ICS_URL
+Shows local weather, upcoming Google Calendar events, and Finsbury Park Tube
+arrivals/status. Calendar access uses the private GOOGLE_CALENDAR_ICS_URL
 GitHub Actions secret; the secret URL is never written into generated files.
 
 Run `python render.py --demo` to render sample data without network access.
@@ -25,18 +26,10 @@ TZ = ZoneInfo("Europe/London")
 LAT, LON = 51.5642, -0.1065
 TFL_STOP = "940GZZLUFPK"
 OUT = Path(os.environ.get("OUT_DIR", "site"))
-HOURS = 12
-TUBE_LINES = ["victoria", "jubilee", "elizabeth", "northern"]
+HOURS = 6
+TUBE_LINES = ["victoria", "piccadilly"]
 SHOW_TUBE_ARRIVALS = True
 MAX_CALENDAR_EVENTS = 4
-RAIL_FROM, RAIL_TO = "FPK", "MOG"
-HUXLEY_URL = os.environ.get("HUXLEY_URL", "https://huxley2.azurewebsites.net")
-ARRIVAL_STOPS = {
-    "victoria": ("940GZZLUFPK", "Finsbury Park"),
-    "jubilee": ("940GZZLUGPK", "Green Park"),
-    "elizabeth": ("910GLIVST", "Liverpool Street"),
-    "northern": ("940GZZLUACY", "Archway"),
-}
 
 FONT_DIRS = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu",
              "/Library/Fonts", "/System/Library/Fonts/Supplemental", "C:/Windows/Fonts"]
@@ -65,59 +58,30 @@ def tfl_params():
 
 
 def fetch_weather(now):
-    """Fetch a 12-hour local forecast plus practical clothing indicators."""
     data = get_json("https://api.open-meteo.com/v1/forecast", {
         "latitude": LAT, "longitude": LON, "timezone": "Europe/London",
-        "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m",
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
-        "hourly": "temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_gusts_10m",
+        "current": "temperature_2m,weather_code",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        "hourly": "temperature_2m,precipitation_probability,weather_code",
         "forecast_days": 2})
-    daily = data["daily"]
-    hourly = data["hourly"]
-    cutoff = now.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+    rain = data["daily"]["precipitation_probability_max"][0]
     hours = []
-    for values in zip(hourly["time"], hourly["temperature_2m"],
-                      hourly["apparent_temperature"], hourly["precipitation_probability"],
-                      hourly["precipitation"], hourly["weather_code"],
-                      hourly["wind_speed_10m"], hourly["wind_gusts_10m"]):
-        stamp, temp, feels, probability, rain_mm, code, wind, gust = values
+    cutoff = now.replace(minute=0, second=0, microsecond=0, tzinfo=None)
+    hourly = data["hourly"]
+    for stamp, temp, probability, code in zip(
+            hourly["time"], hourly["temperature_2m"],
+            hourly["precipitation_probability"], hourly["weather_code"]):
         dt = datetime.fromisoformat(stamp)
-        if dt >= cutoff and temp is not None:
-            hours.append({
-                "label": dt.strftime("%H"),
-                "temp": round(temp),
-                "feels": round(feels if feels is not None else temp),
-                "rain": round(probability or 0),
-                "rain_mm": round(rain_mm or 0, 1),
-                "code": code or 0,
-                "wind": round(wind or 0),
-                "gust": round(gust or 0),
-            })
-        if len(hours) >= HOURS:
+        if dt > cutoff and temp is not None:
+            hours.append({"label": dt.strftime("%H:%M"), "temp": round(temp),
+                          "rain": probability or 0, "code": code or 0})
+        if len(hours) == HOURS:
             break
-    current = data["current"]
-    rain_peak = daily["precipitation_probability_max"][0]
-    morning = [h for h in hours if 6 <= int(h["label"]) <= 11]
-    wettest = max(morning, key=lambda h: h["rain"], default=None)
-    feels_min = min((h["feels"] for h in morning), default=round(current.get("apparent_temperature", current["temperature_2m"])))
-    max_gust = max((h["gust"] for h in morning), default=round(current.get("wind_gusts_10m", 0)))
-    return {
-        "temp": round(current["temperature_2m"]),
-        "feels": round(current.get("apparent_temperature", current["temperature_2m"])),
-        "code": current["weather_code"],
-        "hi": round(daily["temperature_2m_max"][0]),
-        "lo": round(daily["temperature_2m_min"][0]),
-        "rain": 0 if rain_peak is None else round(rain_peak),
-        "wind": round(current.get("wind_speed_10m", 0)),
-        "gust": round(current.get("wind_gusts_10m", 0)),
-        "sunrise": daily.get("sunrise", [""])[0][-5:] if daily.get("sunrise") else "",
-        "sunset": daily.get("sunset", [""])[0][-5:] if daily.get("sunset") else "",
-        "morning_feels_min": feels_min,
-        "morning_rain": wettest["rain"] if wettest else 0,
-        "morning_rain_mm": max((h["rain_mm"] for h in morning), default=0),
-        "morning_gust": max_gust,
-        "hours": hours,
-    }
+    return {"temp": round(data["current"]["temperature_2m"]),
+            "code": data["current"]["weather_code"],
+            "hi": round(data["daily"]["temperature_2m_max"][0]),
+            "lo": round(data["daily"]["temperature_2m_min"][0]),
+            "rain": 0 if rain is None else rain, "hours": hours}
 
 
 def fetch_calendar(now):
@@ -163,30 +127,24 @@ def fetch_calendar(now):
             for event in result[:MAX_CALENDAR_EVENTS]]
 
 
-def fetch_route_arrivals():
-    """Arrivals relevant to the partner's two Canary Wharf route options."""
-    result = {}
-    for line_id, (stop_id, _label) in ARRIVAL_STOPS.items():
-        try:
-            data = get_json(f"https://api.tfl.gov.uk/Line/{line_id}/Arrivals/{stop_id}", tfl_params())
-            data.sort(key=lambda item: item.get("timeToStation", 10**9))
-            if data:
-                result[line_id] = {
-                    "station": _label,
-                    "dest": (data[0].get("destinationName") or data[0].get("towards") or "").replace(" Underground Station", ""),
-                    "mins": [max(0, round(item.get("timeToStation", 0) / 60)) for item in data[:3]],
-                }
-            else:
-                result[line_id] = None
-        except Exception as exc:
-            print(f"[warn] {line_id} arrivals failed: {exc}", file=sys.stderr)
-            result[line_id] = None
-    return result
+def fetch_tube():
+    arrivals = get_json(f"https://api.tfl.gov.uk/StopPoint/{TFL_STOP}/Arrivals", tfl_params())
+    groups = {}
+    for arrival in arrivals:
+        if arrival.get("lineId") in TUBE_LINES:
+            groups.setdefault((arrival["lineId"], arrival.get("platformName", "")), []).append(arrival)
+    output = {}
+    for (line, _platform), items in sorted(groups.items()):
+        items.sort(key=lambda item: item["timeToStation"])
+        destination = items[0].get("destinationName") or items[0].get("towards") or ""
+        output.setdefault(line, []).append({
+            "dest": destination.replace(" Underground Station", ""),
+            "mins": [max(0, round(item["timeToStation"] / 60)) for item in items[:3]]})
+    return output
 
 
 def fetch_status():
-    """Service status for Victoria, Jubilee, Elizabeth and Northern lines."""
-    data = get_json("https://api.tfl.gov.uk/Line/victoria,jubilee,elizabeth,northern/Status", tfl_params())
+    data = get_json("https://api.tfl.gov.uk/Line/Mode/tube/Status", tfl_params())
     lines = {}
     for line in data:
         statuses = line.get("lineStatuses") or [{}]
@@ -195,7 +153,7 @@ def fetch_status():
         reason = (status.get("reason") or "").strip()
         if ": " in reason[:40]:
             reason = reason.split(": ", 1)[1]
-        lines[line["id"]] = {"name": line.get("name", line["id"].title()),
+        lines[line["id"]] = {"name": line.get("name", line["id"]),
                              "status": status.get("statusSeverityDescription", "Unknown"),
                              "ok": status.get("statusSeverity") == 10,
                              "reason": reason}
@@ -211,35 +169,24 @@ def safe(fn, name):
 
 
 def demo_data(now):
-    weather = {
-        "temp": 9, "feels": 6, "code": 3, "hi": 11, "lo": 5, "rain": 75,
-        "wind": 14, "gust": 25, "sunrise": "07:30", "sunset": "16:00",
-        "morning_feels_min": 5, "morning_rain": 70, "morning_rain_mm": 1.2,
-        "morning_gust": 24,
-        "hours": [{"label": f"{(now.hour+i+1)%24:02d}",
-                   "temp": 9-i//4, "feels": 6-i//5, "rain": [15,25,55,70,40,20,10,5,5,0,0,0][i],
-                   "rain_mm": [0,0.1,0.4,0.8,0.3,0.1,0,0,0,0,0,0][i],
-                   "code": [3,3,61,63,61,2,1,0,0,0,0,0][i],
-                   "wind": 14, "gust": 24} for i in range(12)]
-    }
-    events = [
+    weather = {"temp": 9, "code": 2, "hi": 11, "lo": 5, "rain": 40, "hours": [
+        {"label": f"{(now.hour + i + 1) % 24:02d}:00", "temp": 10 + i % 2,
+         "rain": 10 + i * 8, "code": [2, 3, 61, 63, 80, 0][i]} for i in range(6)]}
+    calendar = [
         {"date": now.date(), "time": "15:30", "title": "Project catch-up", "all_day": False},
         {"date": now.date(), "time": "18:00", "title": "Dinner with friends", "all_day": False},
-        {"date": now.date()+timedelta(days=1), "time": "All day", "title": "Annual leave", "all_day": True},
-    ]
-    route_arrivals = {
-        "victoria": {"station": "Finsbury Park", "dest": "Green Park", "mins": [2, 5, 8]},
-        "jubilee": {"station": "Green Park", "dest": "Canary Wharf", "mins": [4, 7, 10]},
-        "elizabeth": {"station": "Liverpool Street", "dest": "Canary Wharf", "mins": [3, 6, 9]},
-        "northern": {"station": "Archway", "dest": "Kennington", "mins": [1, 4, 7]},
-    }
-    status = {
-        "victoria": {"name": "Victoria", "status": "Good Service", "ok": True, "reason": ""},
-        "jubilee": {"name": "Jubilee", "status": "Good Service", "ok": True, "reason": ""},
-        "elizabeth": {"name": "Elizabeth", "status": "Good Service", "ok": True, "reason": ""},
-        "northern": {"name": "Northern", "status": "Good Service", "ok": True, "reason": ""},
-    }
-    return weather, events, route_arrivals, status
+        {"date": now.date() + timedelta(days=1), "time": "All day", "title": "Annual leave", "all_day": True},
+        {"date": now.date() + timedelta(days=1), "time": "10:00", "title": "Team meeting", "all_day": False}]
+    tube = {"victoria": [{"dest": "Walthamstow Central", "mins": [1, 4, 7]},
+                         {"dest": "Brixton", "mins": [3, 6, 9]}],
+            "piccadilly": [{"dest": "Cockfosters", "mins": [2, 7, 11]},
+                           {"dest": "Heathrow Terminal 5", "mins": [4, 9]}]}
+    status = {"victoria": {"name": "Victoria", "status": "Good Service", "ok": True, "reason": ""},
+              "piccadilly": {"name": "Piccadilly", "status": "Minor Delays", "ok": False,
+                             "reason": "Minor delays between Arnos Grove and Cockfosters due to an earlier signal failure."},
+              "northern": {"name": "Northern", "status": "Part Suspended", "ok": False, "reason": ""},
+              "central": {"name": "Central", "status": "Good Service", "ok": True, "reason": ""}}
+    return weather, calendar, tube, status
 
 
 def describe(code):
@@ -324,43 +271,27 @@ def rule(d, y, width=3, fill=0):
 
 def draw_weather(d, weather):
     if not weather:
-        d.text((M, 100), "Weather unavailable", font=font(24), fill=110)
+        d.text((M, 100), "Weather unavailable", font=font(28), fill=110)
         return
     label, icon = describe(weather["code"])
-    draw_icon(d, icon, M, 53, 82)
-    d.text((120, 43), f"{weather['temp']}°", font=font(65, True), fill=0)
-    d.text((122, 112), label, font=font(21), fill=0)
-    d.text((360, 55), f"Feels {weather.get('feels', weather['temp'])}°", font=font(21, True), fill=0)
-    d.text((360, 83), f"High {weather['hi']}° / Low {weather['lo']}°", font=font(18), fill=0)
-    d.text((360, 109), f"Rain today {weather['rain']}%", font=font(18), fill=0)
-
-    # Actionable morning advice, based on actual hourly forecast values.
-    advice = []
-    if weather.get("morning_rain", 0) >= 45 or weather.get("morning_rain_mm", 0) >= 0.5:
-        advice.append("WATERPROOF")
-    if weather.get("morning_feels_min", 12) <= 7:
-        advice.append("EXTRA LAYER")
-    if weather.get("morning_gust", 0) >= 30:
-        advice.append("WINDY")
-    advice_text = "  ·  ".join(advice) if advice else "NO SPECIAL WEATHER GEAR"
-    d.text((M, 145), fit(d, advice_text, font(17, True), W-2*M), font=font(17, True), fill=0)
-
+    draw_icon(d, icon, M, 54, 96)
+    d.text((140, 42), f"{weather['temp']}°", font=font(72, True), fill=0)
+    d.text((140, 126), label, font=font(24), fill=0)
+    d.text((375, 58), f"High {weather['hi']}°", font=font(24, True), fill=0)
+    d.text((375, 90), f"Low {weather['lo']}°", font=font(24), fill=0)
+    d.text((375, 122), f"Rain {weather['rain']}%", font=font(24), fill=0)
     hours = weather.get("hours") or []
     if hours:
         colw = (W-2*M)/len(hours)
         for i, hour in enumerate(hours):
             cx = M+colw*i+colw/2
             _, weather_icon = describe(hour["code"])
-            ctext(d, cx, 172, hour["label"], font(15, True), 70)
-            draw_icon(d, weather_icon, cx-15, 191, 30)
-            ctext(d, cx, 222, f"{hour['temp']}°", font(18, True))
-            ctext(d, cx, 244, f"{hour['rain']}%", font(13), 70)
-            if i:
-                d.line([M+colw*i, 171, M+colw*i, 263], fill=205, width=1)
-    footer = f"Wind {weather.get('wind', 0)} km/h · Gusts {weather.get('gust', 0)} km/h"
-    if weather.get("sunrise") and weather.get("sunset"):
-        footer += f"     Sunrise {weather['sunrise']} · Sunset {weather['sunset']}"
-    d.text((M, 269), fit(d, footer, font(14), W-2*M), font=font(14), fill=85)
+            ctext(d, cx, 166, hour["label"], font(19), 60)
+            draw_icon(d, weather_icon, cx-22, 190, 44)
+            ctext(d, cx, 236, f"{hour['temp']}°", font(26, True))
+            ctext(d, cx, 268, f"{hour['rain']}%", font(19), 60)
+            if i: d.line([M+colw*i, 168, M+colw*i, 292], fill=190, width=1)
+
 
 
 def draw_calendar(d, events, now, top=306):
@@ -395,57 +326,79 @@ def draw_calendar(d, events, now, top=306):
     return y
 
 
-def draw_commute(d, arrivals, status, top):
-    d.text((M, top), "COMMUTE", font=font(23, True), fill=0)
-    y = top + 30
-    lines = [
-        ("victoria", "Finsbury Park"),
-        ("jubilee", "Green Park"),
-        ("elizabeth", "Liverpool Street"),
-        ("northern", "Archway"),
-    ]
-    for line_id, station in lines:
-        item = (status or {}).get(line_id)
-        name = item.get("name", line_id.title()) if item else line_id.title()
-        status_text = item.get("status", "Status unknown") if item else "Status unknown"
-        good = item.get("ok", False) if item else False
-        d.text((M, y), name, font=font(19, True), fill=0)
-        rtext(d, W-M, y+1, status_text, font(15, not good), 0 if not good else 65)
-        y += 20
+def draw_tube(d, tube, status, top):
+    """Draw the two requested Tube lines with clearer status/reason hierarchy."""
+    d.text((M, top), "Tube · Finsbury Park", font=font(25, True), fill=0)
+    y = top + 39
 
-        live = (arrivals or {}).get(line_id)
-        if live and live.get("mins"):
-            mins = ", ".join("due" if minute == 0 else str(minute)
-                             for minute in live["mins"][:3]) + " min"
-            detail = f"{station} · {live.get('dest') or 'Departures'}"
-            detail = fit(d, detail, font(14), W-2*M-d.textlength(mins, font=font(14, True))-12)
-            d.text((M+6, y), detail, font=font(14), fill=75)
-            rtext(d, W-M, y, mins, font(14, True), 0)
-        else:
-            d.text((M+6, y), f"{station} · live arrivals unavailable", font=font(14), fill=110)
-        y += 19
+    if tube is None and status is None:
+        d.text((M, y), "Tube information unavailable", font=font(22), fill=110)
+        return
 
-        if item and not good and item.get("reason"):
-            reason_lines = wrap(d, item["reason"], font(13), W-2*M, 1)
-            for reason in reason_lines:
-                d.text((M+6, y), reason, font=font(13), fill=80)
-                y += 15
-        y += 4
-    return y
+    for line_id in TUBE_LINES:
+        line_status = (status or {}).get(line_id)
+        name = line_status["name"] if line_status else line_id.title()
+        status_text = line_status["status"] if line_status else "Status unknown"
+        ok = line_status.get("ok", False) if line_status else False
+
+        # Each line gets a distinct heading row: line name left, status right.
+        d.text((M, y), name, font=font(23, True), fill=0)
+        rtext(d, W - M, y + 2, status_text, font(19, not ok), 0 if not ok else 55)
+        y += 29
+
+        reason = (line_status or {}).get("reason", "")
+        if not ok and reason:
+            reason_lines = wrap(d, reason, font(16), W - 2*M, 2)
+            for reason_line in reason_lines:
+                d.text((M + 2, y), reason_line, font=font(16), fill=65)
+                y += 19
+
+        trains = (tube or {}).get(line_id, [])
+        if trains:
+            for train in trains[:2]:
+                mins = ", ".join("due" if minute == 0 else str(minute)
+                                 for minute in train["mins"][:3]) + " min"
+                arrival_font = font(18, True)
+                destination = fit(d, f"→ {train['dest']}", font(18),
+                                  W - 2*M - d.textlength(mins, font=arrival_font) - 12)
+                d.text((M + 8, y), destination, font=font(18), fill=0)
+                rtext(d, W - M, y, mins, arrival_font, 0)
+                y += 23
+        elif ok:
+            d.text((M + 8, y), "Live arrivals unavailable", font=font(16), fill=110)
+            y += 20
+        y += 8
+
+    if status:
+        disrupted = sorted(item["name"] for key, item in status.items()
+                           if key not in TUBE_LINES and not item["ok"])
+        if disrupted:
+            d.line([M, y, W-M, y], fill=170, width=1)
+            y += 8
+            d.text((M, y), "OTHER LINE DISRUPTIONS", font=font(14, True), fill=90)
+            y += 20
+            summary = " · ".join(disrupted)
+            for line in wrap(d, summary, font(16), W - 2*M, 2):
+                d.text((M, y), line, font=font(16), fill=65)
+                y += 19
 
 
-def render(weather, events, route_arrivals, status, now):
+def render(weather, events, tube, status, now):
     image = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(image)
-    draw.text((M, 8), f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
-              font=font(25, True), fill=0)
-    rtext(draw, W-M, 15, f"upd {now.strftime('%H:%M')}", font(16), 110)
+    draw.text((M, 12), f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
+              font=font(28, True), fill=0)
+    rtext(draw, W-M, 20, f"upd {now.strftime('%H:%M')}", font(18), 110)
     draw_weather(draw, weather)
-    rule(draw, 291)
-    calendar_bottom = draw_calendar(draw, events, now, top=299)
-    commute_top = max(420, calendar_bottom + 10)
-    rule(draw, commute_top - 8)
-    draw_commute(draw, route_arrivals, status, commute_top)
+    rule(draw, 296)
+    calendar_bottom = draw_calendar(draw, events, now, top=306)
+    # Keep the Tube panel close to the calendar when there are few events,
+    # but allow it to move down naturally when the calendar is busier.
+    tube_top = max(440, calendar_bottom + 17)
+    if tube_top > 505:
+        tube_top = 505
+    rule(draw, tube_top - 10)
+    draw_tube(draw, tube, status, tube_top)
     return image
 
 
@@ -462,14 +415,13 @@ def public_base():
 def main():
     now = datetime.now(TZ)
     if "--demo" in sys.argv:
-        weather, events, route_arrivals, status = demo_data(now)
+        weather, events, tube, status = demo_data(now)
     else:
         weather = safe(lambda: fetch_weather(now), "weather")
         events = safe(lambda: fetch_calendar(now), "calendar")
-        route_arrivals = safe(fetch_route_arrivals, "commute arrivals")
-        status = safe(fetch_status, "commute line status")
-
-    image = render(weather, events, route_arrivals, status, now)
+        tube = safe(fetch_tube, "tube arrivals")
+        status = safe(fetch_status, "tube status")
+    image = render(weather, events, tube, status, now)
     (OUT / "api").mkdir(parents=True, exist_ok=True)
     image.save(OUT / "dashboard.png", optimize=True)
     stamp = now.strftime("%Y%m%d%H%M")
