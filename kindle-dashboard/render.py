@@ -240,11 +240,7 @@ def fetch_rail(now):
             "timeOffset": 0,
             "timeWindow": 120,
         },
-        headers={
-    "x-apikey": api_key.strip(),
-    "Accept": "application/json",
-    "User-Agent": "FinsparkKindleDashboard/1.0",
-},
+        headers={"x-apikey": api_key, "Accept": "application/json"},
         timeout=20,
     )
     response.raise_for_status()
@@ -289,13 +285,10 @@ def fetch_rail(now):
         if cancelled:
             continue
 
-        if 12 <= minutes_until <= 15:
-            relevance = "WALK NOW"
+        if 20 <= minutes_until <= 25:
+            relevance = "GOOD WINDOW"
             band = "ideal"
-        elif 10 <= minutes_until <= 11:
-            relevance = "TIGHT"
-            band = "tight"
-        elif minutes_until == 9:
+        elif 15 <= minutes_until <= 19:
             relevance = "TIGHT"
             band = "tight"
         else:
@@ -400,10 +393,10 @@ def demo_data(now):
         "northern": {"name": "Northern", "status": "Good Service", "ok": True, "reason": ""},
     }
     rail = [
-        {"scheduled": "08:32", "platform": "1", "status": "On time", "minutes": 14,
-         "relevance": "WALK NOW", "band": "ideal"},
-        {"scheduled": "08:39", "platform": "2", "status": "On time", "minutes": 21,
-         "relevance": "", "band": "later"},
+        {"scheduled": "08:32", "platform": "1", "status": "On time", "minutes": 22,
+         "relevance": "GOOD WINDOW", "band": "ideal"},
+        {"scheduled": "08:39", "platform": "2", "status": "On time", "minutes": 17,
+         "relevance": "TIGHT", "band": "tight"},
         {"scheduled": "08:46", "platform": "1", "status": "Delayed", "minutes": 28,
          "relevance": "", "band": "later"},
     ]
@@ -587,8 +580,8 @@ def draw_rail(d, departures, top):
     for service in departures[:3]:
         left = f"{service.get('display_time', service['scheduled'])}  Plat {service['platform']}"
         detail = f"{service['minutes']} min · {service['status']}"
-        if service["relevance"] == "WALK NOW":
-            detail = f"{service['minutes']} min · WALK NOW"
+        if service["relevance"] == "GOOD WINDOW":
+            detail = f"{service['minutes']} min · GOOD WINDOW"
             shade = 0
         elif service["relevance"] == "TIGHT":
             detail += " · tight"
