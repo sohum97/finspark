@@ -9,6 +9,7 @@ Run `python render.py --demo` to render sample data without network access.
 import json
 import math
 import os
+import re
 import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -30,7 +31,7 @@ TUBE_LINES = ["victoria", "jubilee", "elizabeth", "northern"]
 SHOW_TUBE_ARRIVALS = True
 MAX_CALENDAR_EVENTS = 4
 RAIL_FROM, RAIL_TO = "FPK", "MOG"
-HUXLEY_URL = os.environ.get("HUXLEY_URL", "https://huxley2.azurewebsites.net")
+RAIL_API_BASE = "https://api1.raildata.org.uk/1010-live-departure-board-dep1_2/LDBWS/api/20220120"
 ARRIVAL_STOPS = {
     "victoria": ("940GZZLUFPK", "Finsbury Park"),
     "jubilee": ("940GZZLUGPK", "Green Park"),
@@ -223,6 +224,100 @@ def fetch_calendar(now):
             for event in result[:MAX_CALENDAR_EVENTS]]
 
 
+def fetch_rail(now):
+    """Fetch Finsbury Park departures filtered to Moorgate using the RDM LDBWS API."""
+    api_key = os.environ.get("LDBWS_API_KEY")
+    if not api_key:
+        raise RuntimeError("LDBWS_API_KEY is not set")
+
+    url = f"{RAIL_API_BASE}/GetDepartureBoard/{RAIL_FROM}"
+    response = requests.get(
+        url,
+        params={
+            "numRows": 10,
+            "filterCrs": RAIL_TO,
+            "filterType": "to",
+            "timeOffset": 0,
+            "timeWindow": 120,
+        },
+        headers={"x-apikey": api_key, "Accept": "application/json"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    board = response.json()
+    services = board.get("trainServices") or []
+    departures = []
+
+    for service in services:
+        scheduled = (service.get("std") or "").strip()
+        estimate = (service.get("etd") or "").strip()
+        if not scheduled:
+            continue
+        effective_time = estimate if re.fullmatch(r"\d{1,2}:\d{2}", estimate) else scheduled
+        try:
+            departure_dt = datetime.strptime(effective_time, "%H:%M").replace(
+                year=now.year, month=now.month, day=now.day, tzinfo=TZ
+            )
+        except ValueError:
+            continue
+
+        # If the board contains a service just after midnight, place it on tomorrow.
+        if departure_dt < now - timedelta(hours=12):
+            departure_dt += timedelta(days=1)
+
+        minutes_until = int((departure_dt - now).total_seconds() // 60)
+        # Keep the user's requested safety cutoff: departures within 8 minutes are hidden.
+        if minutes_until <= 8:
+            continue
+
+        cancelled = bool(service.get("isCancelled")) or estimate.lower() == "cancelled"
+        if cancelled:
+            status = "Cancelled"
+        elif estimate.lower() == "on time":
+            status = "On time"
+        elif estimate.lower() in ("delayed", "no report"):
+            status = estimate.title()
+        elif estimate:
+            status = f"Exp {estimate}"
+        else:
+            status = "No estimate"
+
+        if cancelled:
+            continue
+
+        if 12 <= minutes_until <= 15:
+            relevance = "WALK NOW"
+            band = "ideal"
+        elif 10 <= minutes_until <= 11:
+            relevance = "TIGHT"
+            band = "tight"
+        elif minutes_until == 9:
+            relevance = "TIGHT"
+            band = "tight"
+        else:
+            relevance = ""
+            band = "later"
+
+        departures.append({
+            "scheduled": scheduled,
+            "display_time": effective_time,
+            "estimate": estimate,
+            "platform": service.get("platform") or "—",
+            "status": status,
+            "minutes": minutes_until,
+            "relevance": relevance,
+            "band": band,
+            "destination": ", ".join(
+                location.get("locationName", "")
+                for location in (service.get("destination") or [])
+                if location.get("locationName")
+            ) or "Moorgate",
+        })
+
+    departures.sort(key=lambda item: item["minutes"])
+    return departures[:4]
+
+
 def fetch_route_arrivals():
     """Arrivals relevant to the partner's two Canary Wharf route options."""
     result = {}
@@ -300,9 +395,17 @@ def demo_data(now):
         "elizabeth": {"name": "Elizabeth", "status": "Good Service", "ok": True, "reason": ""},
         "northern": {"name": "Northern", "status": "Good Service", "ok": True, "reason": ""},
     }
+    rail = [
+        {"scheduled": "08:32", "platform": "1", "status": "On time", "minutes": 14,
+         "relevance": "WALK NOW", "band": "ideal"},
+        {"scheduled": "08:39", "platform": "2", "status": "On time", "minutes": 21,
+         "relevance": "", "band": "later"},
+        {"scheduled": "08:46", "platform": "1", "status": "Delayed", "minutes": 28,
+         "relevance": "", "band": "later"},
+    ]
     environment = {"aqi": 18, "aqi_label": "Good", "pm25": 4.2, "pm10": 9.5,
                    "pollen_label": "Seasonal pollen n/a", "pollen_available": False}
-    return weather, events, route_arrivals, status, environment
+    return weather, events, route_arrivals, status, environment, rail
 
 
 def describe(code):
@@ -465,6 +568,35 @@ def draw_calendar(d, events, now, top=306):
     return y
 
 
+def draw_rail(d, departures, top):
+    """Compact National Rail panel; 12–15 minute departures are highlighted."""
+    d.text((M, top), "YOUR TRAIN · FINSBURY PARK → MOORGATE",
+           font=font(17, True), fill=0)
+    y = top + 22
+    if departures is None:
+        d.text((M, y), "National Rail departures unavailable", font=font(14), fill=110)
+        return y + 18
+    if not departures:
+        d.text((M, y), "No suitable departures in the next 2 hours", font=font(14), fill=90)
+        return y + 18
+
+    for service in departures[:3]:
+        left = f"{service.get('display_time', service['scheduled'])}  Plat {service['platform']}"
+        detail = f"{service['minutes']} min · {service['status']}"
+        if service["relevance"] == "WALK NOW":
+            detail = f"{service['minutes']} min · WALK NOW"
+            shade = 0
+        elif service["relevance"] == "TIGHT":
+            detail += " · tight"
+            shade = 75
+        else:
+            shade = 85
+        d.text((M + 2, y), fit(d, left, font(14, True), 225), font=font(14, True), fill=0)
+        rtext(d, W-M, y, detail, font(13, service["band"] == "ideal"), shade)
+        y += 21
+    return y + 1
+
+
 def draw_commute(d, arrivals, status, top):
     d.text((M, top), "COMMUTE", font=font(23, True), fill=0)
     y = top + 30
@@ -481,7 +613,7 @@ def draw_commute(d, arrivals, status, top):
         good = item.get("ok", False) if item else False
         d.text((M, y), name, font=font(19, True), fill=0)
         rtext(d, W-M, y+1, status_text, font(15, not good), 0 if not good else 65)
-        y += 20
+        y += 16
 
         live = (arrivals or {}).get(line_id)
         if live and live.get("mins"):
@@ -493,14 +625,14 @@ def draw_commute(d, arrivals, status, top):
             rtext(d, W-M, y, mins, font(14, True), 0)
         else:
             d.text((M+6, y), f"{station} · live arrivals unavailable", font=font(14), fill=110)
-        y += 19
+        y += 14
 
         if item and not good and item.get("reason"):
             reason_lines = wrap(d, item["reason"], font(13), W-2*M, 1)
             for reason in reason_lines:
                 d.text((M+6, y), reason, font=font(13), fill=80)
                 y += 15
-        y += 4
+        y += 1
     return y
 
 
@@ -529,7 +661,7 @@ def draw_environment(d, environment, weather, top):
     return y
 
 
-def render(weather, events, route_arrivals, status, environment, now):
+def render(weather, events, route_arrivals, status, environment, rail, now):
     image = Image.new("L", (W, H), 255)
     draw = ImageDraw.Draw(image)
     draw.text((M, 8), f"{now.strftime('%A')} {now.day} {now.strftime('%B')}",
@@ -538,12 +670,18 @@ def render(weather, events, route_arrivals, status, environment, now):
     draw_weather(draw, weather)
     rule(draw, 296)
     calendar_bottom = draw_calendar(draw, events, now, top=304)
-    commute_top = max(420, calendar_bottom + 10)
-    rule(draw, commute_top - 8)
+
+    rail_top = max(410, calendar_bottom + 5)
+    rule(draw, rail_top - 6)
+    rail_bottom = draw_rail(draw, rail, rail_top)
+
+    commute_top = rail_bottom + 4
+    rule(draw, commute_top - 4)
     commute_bottom = draw_commute(draw, route_arrivals, status, commute_top)
-    environment_top = max(650, commute_bottom + 6)
+
+    environment_top = commute_bottom + 3
     if environment_top < 755:
-        rule(draw, environment_top - 5)
+        rule(draw, environment_top - 3)
         draw_environment(draw, environment, weather or {}, environment_top)
     return image
 
@@ -561,15 +699,16 @@ def public_base():
 def main():
     now = datetime.now(TZ)
     if "--demo" in sys.argv:
-        weather, events, route_arrivals, status, environment = demo_data(now)
+        weather, events, route_arrivals, status, environment, rail = demo_data(now)
     else:
         weather = safe(lambda: fetch_weather(now), "weather")
         events = safe(lambda: fetch_calendar(now), "calendar")
         route_arrivals = safe(fetch_route_arrivals, "commute arrivals")
         status = safe(fetch_status, "commute line status")
         environment = safe(lambda: fetch_environment(now), "environment")
+        rail = safe(lambda: fetch_rail(now), "National Rail")
 
-    image = render(weather, events, route_arrivals, status, environment, now)
+    image = render(weather, events, route_arrivals, status, environment, rail, now)
     (OUT / "api").mkdir(parents=True, exist_ok=True)
     image.save(OUT / "dashboard.png", optimize=True)
     stamp = now.strftime("%Y%m%d%H%M")
