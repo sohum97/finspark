@@ -17,17 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: pip install -r kindle-dashboard/requirements.txt
+
       - name: Render dashboard
         run: python kindle-dashboard/render.py
         env:
-          LDBWS_TOKEN: ${{ secrets.LDBWS_TOKEN }}
           TFL_APP_KEY: ${{ secrets.TFL_APP_KEY }}
           GOOGLE_CALENDAR_ICS_URL: ${{ secrets.GOOGLE_CALENDAR_ICS_URL }}
+
       - name: Upload dashboard to private Cloudflare R2 via Worker
         env:
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
